@@ -1,0 +1,22 @@
+{
+	"name": "workerd-faas",
+	"version": "0.0.0",
+	"private": true,
+	"scripts": {
+		"dev": "BASE_DOMAIN=func.local concurrently \"pnpm run watch\" \"pnpm run start\"",
+		"watch": "nodemon --watch src --watch tsconfig.json --watch worker-configuration.d.ts --watch package.json --watch pnpm-lock.yaml --ext ts,json,d.ts --exec \"wrangler build\"",
+		"start": "workerd serve config.capnp --verbose --experimental -w",
+		"cf-typegen": "wrangler types"
+	},
+	"devDependencies": {
+		"concurrently": "^9.2.1",
+		"nodemon": "^3.1.10",
+		"typescript": "^5.5.2",
+		"wrangler": "^4.38.0"
+	},
+	"dependencies": {
+		"@hono/zod-validator": "^0.7.3",
+		"hono": "^4.9.8",
+		"zod": "^4.1.11"
+	}
+}

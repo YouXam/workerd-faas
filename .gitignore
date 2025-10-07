@@ -168,3 +168,7 @@ dist
 
 
 data/
+.DS_Store
+*.txt
+*.log
+__pycache__

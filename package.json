@@ -6,9 +6,16 @@
 		"dev": "BASE_DOMAIN=func.local concurrently \"pnpm run watch\" \"pnpm run start\"",
 		"watch": "nodemon --watch src --watch tsconfig.json --watch worker-configuration.d.ts --watch package.json --watch pnpm-lock.yaml --ext ts,json,d.ts --exec \"wrangler build\"",
 		"start": "workerd serve config.capnp --verbose --experimental -w",
-		"cf-typegen": "wrangler types"
+		"cf-typegen": "wrangler types",
+		"test": "python3 tests/run_tests.py",
+		"test:oidc": "python3 tests/run_tests.py --suite oidc",
+		"test:auth": "python3 tests/run_tests.py --suite auth",
+		"test:function": "python3 tests/run_tests.py --suite function",
+		"test:version": "python3 tests/run_tests.py --suite version",
+		"test:runtime": "python3 tests/run_tests.py --suite runtime"
 	},
 	"devDependencies": {
+		"@types/node": "^24.6.2",
 		"concurrently": "^9.2.1",
 		"nodemon": "^3.1.10",
 		"typescript": "^5.5.2",
@@ -17,6 +24,7 @@
 	"dependencies": {
 		"@hono/zod-validator": "^0.7.3",
 		"hono": "^4.9.8",
+		"jose": "^6.1.0",
 		"zod": "^4.1.11"
 	}
 }

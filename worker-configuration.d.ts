@@ -11,6 +11,14 @@ declare namespace Cloudflare {
 		FILES: Omit<Fetcher, "connect">;
 		LOADER: WorkerLoader;
 		BASE_DOMAIN?: string;
+		JWT_SECRET?: string;
+		OIDC_ISSUER?: string;
+		OIDC_AUTHORIZATION_ENDPOINT?: string;
+		OIDC_TOKEN_ENDPOINT?: string;
+		OIDC_USERINFO_ENDPOINT?: string;
+		OIDC_CLIENT_ID?: string;
+		OIDC_CLIENT_SECRET?: string;
+		OIDC_REDIRECT_URI?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}

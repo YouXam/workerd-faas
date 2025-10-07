@@ -5,6 +5,10 @@ const faasPlatform :Workerd.Config = (
 		(name = "main", worker = .faas),
 		(name = "DO_DIR", disk = (writable = true, path = "data/do")),
 		(name = "FILES_DIR", disk = (writable = true, path = "data/files")),
+		(name = "internet", network = (
+			allow = ["public", "private", "local"],
+			tlsOptions = (trustBrowserCas = true)
+		)),
 	],
   sockets = [ ( name = "http", address = "*:8080", http = (), service = "main" ) ]
 );
@@ -21,7 +25,15 @@ const faas :Workerd.Worker = (
     (name = "D1DatabaseObject", durableObjectNamespace = "D1DatabaseObject"),
 		(name = "FILES", service = "FILES_DIR"),
 		(name = "LOADER", workerLoader = (id = "loader")),
-		(name = "BASE_DOMAIN", fromEnvironment = "BASE_DOMAIN")
+		(name = "BASE_DOMAIN", fromEnvironment = "BASE_DOMAIN"),
+		(name = "JWT_SECRET", fromEnvironment = "JWT_SECRET"),
+		(name = "OIDC_ISSUER", fromEnvironment = "OIDC_ISSUER"),
+		(name = "OIDC_AUTHORIZATION_ENDPOINT", fromEnvironment = "OIDC_AUTHORIZATION_ENDPOINT"),
+		(name = "OIDC_TOKEN_ENDPOINT", fromEnvironment = "OIDC_TOKEN_ENDPOINT"),
+		(name = "OIDC_USERINFO_ENDPOINT", fromEnvironment = "OIDC_USERINFO_ENDPOINT"),
+		(name = "OIDC_CLIENT_ID", fromEnvironment = "OIDC_CLIENT_ID"),
+		(name = "OIDC_CLIENT_SECRET", fromEnvironment = "OIDC_CLIENT_SECRET"),
+		(name = "OIDC_REDIRECT_URI", fromEnvironment = "OIDC_REDIRECT_URI")
   ],
   compatibilityDate = "2025-08-28",
   compatibilityFlags = ["nodejs_compat"],

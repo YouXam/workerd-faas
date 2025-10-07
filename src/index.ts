@@ -3,6 +3,8 @@ import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { D1DatabaseObject } from './database';
 import makeD1Database from './shared/d1-api';
+import { authenticateUser, generateToken, generateAuthCode, consumeAuthCode, generateOIDCState, validateOIDCState, UserPayload } from './auth';
+import { getOIDCConfig, validateOIDCConfig, exchangeCodeForToken, getUserInfo } from './oidc';
 export { D1DatabaseObject };
 
 const metadataSchema = z.object({
@@ -30,7 +32,9 @@ const aliasSchema = z.object({
 });
 
 async function initializeDatabase(d1: any) {
-	await d1.exec('CREATE TABLE IF NOT EXISTS functions (name TEXT PRIMARY KEY, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
+	await d1.exec('CREATE TABLE IF NOT EXISTS users (account_id TEXT PRIMARY KEY, username TEXT NOT NULL, email TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
+
+	await d1.exec('CREATE TABLE IF NOT EXISTS functions (name TEXT PRIMARY KEY, owner_account_id TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
 
 	await d1.exec('CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, function_name TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (function_name) REFERENCES functions(name))');
 
@@ -166,8 +170,141 @@ const managementApp = new Hono<{ Bindings: Env }>()
 			service: 'FaaS Platform'
 		});
 	})
+	.get('/oauth2/auth', async (c) => {
+		const oidcConfig = getOIDCConfig(c.env);
+		if (!validateOIDCConfig(oidcConfig)) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2001,
+				message: 'OIDC not configured'
+			}]), 500);
+		}
+
+		const state = generateOIDCState();
+		const authUrl = new URL(oidcConfig.authorization_endpoint);
+		authUrl.searchParams.set('client_id', oidcConfig.client_id);
+		authUrl.searchParams.set('redirect_uri', oidcConfig.redirect_uri);
+		authUrl.searchParams.set('response_type', 'code');
+		authUrl.searchParams.set('scope', 'openid profile email');
+		authUrl.searchParams.set('state', state);
+
+		return c.redirect(authUrl.toString());
+	})
+	.get('/auth/callback', async (c) => {
+		const code = c.req.query('code');
+		const state = c.req.query('state');
+
+		if (!code || !state) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2002,
+				message: 'Missing code or state'
+			}]), 400);
+		}
+
+		if (!validateOIDCState(state)) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2003,
+				message: 'Invalid state'
+			}]), 400);
+		}
+
+		const oidcConfig = getOIDCConfig(c.env);
+		const tokenResponse = await exchangeCodeForToken(code, oidcConfig);
+		if (!tokenResponse) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2004,
+				message: 'Failed to exchange code for token'
+			}]), 400);
+		}
+
+		const userInfo = await getUserInfo(tokenResponse.access_token, oidcConfig);
+		if (!userInfo) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2005,
+				message: 'Failed to get user info'
+			}]), 400);
+		}
+
+		const d1 = makeD1Database({ fetcher: c.env.D1DatabaseObject.getByName('faas') });
+		await initializeDatabase(d1);
+
+		const { results } = await d1.prepare(`
+			SELECT account_id, username, email FROM users WHERE email = ?
+		`).bind(userInfo.email).all();
+
+		let user: UserPayload;
+		if (results.length === 0) {
+			const accountId = crypto.randomUUID();
+			const username = userInfo.preferred_username || userInfo.name || userInfo.email?.split('@')[0] || 'user';
+			const email = userInfo.email || '';
+
+			await d1.prepare(`
+				INSERT INTO users (account_id, username, email) VALUES (?, ?, ?)
+			`).bind(accountId, username, email).run();
+
+			user = { account_id: accountId, username, email };
+		} else {
+			const row = results[0] as any;
+			user = {
+				account_id: row.account_id,
+				username: row.username,
+				email: row.email,
+			};
+		}
+
+		const authCode = generateAuthCode(user);
+		return c.redirect(`http://localhost:8976/oauth/callback?code=${authCode}`);
+	})
+	.post('/oauth2/token', async (c) => {
+		const body = await c.req.parseBody();
+		const code = body.code as string;
+
+		if (!code) {
+			return c.json({
+				error: 'invalid_request',
+				error_description: 'Missing code parameter'
+			}, 400);
+		}
+
+		const user = consumeAuthCode(code);
+		if (!user) {
+			return c.json({
+				error: 'invalid_grant',
+				error_description: 'Invalid or expired authorization code'
+			}, 400);
+		}
+
+		const jwtSecret = c.env.JWT_SECRET;
+		if (!jwtSecret) {
+			return c.json({
+				error: 'server_error',
+				error_description: 'JWT_SECRET not configured'
+			}, 500);
+		}
+
+		const accessToken = await generateToken(user, jwtSecret);
+		return c.json({
+			access_token: accessToken,
+			token_type: 'Bearer',
+			expires_in: 31536000, // 1 year in seconds
+		});
+	})
 	.put('/accounts/:account_id/workers/scripts/:script_name', async (c) => {
-		const { script_name } = c.req.param();
+		const user = await authenticateUser(c);
+		if (!user) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2006,
+				message: 'Unauthorized'
+			}]), 401);
+		}
+
+		const { account_id, script_name } = c.req.param();
+		if (account_id !== user.account_id) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2007,
+				message: 'Forbidden'
+			}]), 403);
+		}
+
 		const d1 = makeD1Database({ fetcher: c.env.D1DatabaseObject.getByName('faas') });
 
 		await initializeDatabase(d1);
@@ -186,9 +323,23 @@ const managementApp = new Hono<{ Bindings: Env }>()
 			const metadata = metadataSchema.parse(JSON.parse(metadataString));
 			const versionId = crypto.randomUUID();
 
-			await d1.prepare(`
-				INSERT OR IGNORE INTO functions (name) VALUES (?)
-			`).bind(script_name).run();
+			const { results: existingFunction } = await d1.prepare(`
+				SELECT owner_account_id FROM functions WHERE name = ?
+			`).bind(script_name).all();
+
+			if (existingFunction.length > 0) {
+				const funcRow = existingFunction[0] as any;
+				if (funcRow.owner_account_id !== user.account_id) {
+					return c.json(createApiResponse(null, false, [{
+						code: 2007,
+						message: 'Forbidden'
+					}]), 403);
+				}
+			} else {
+				await d1.prepare(`
+					INSERT INTO functions (name, owner_account_id) VALUES (?, ?)
+				`).bind(script_name, user.account_id).run();
+			}
 
 			await d1.prepare(`
 				INSERT INTO versions (id, function_name) VALUES (?, ?)
@@ -214,11 +365,44 @@ const managementApp = new Hono<{ Bindings: Env }>()
 	.post('/accounts/:account_id/workers/scripts/:script_name/deployments',
 		zValidator('json', deploymentSchema),
 		async (c) => {
-			const { script_name } = c.req.param();
+			const user = await authenticateUser(c);
+			if (!user) {
+				return c.json(createApiResponse(null, false, [{
+					code: 2006,
+					message: 'Unauthorized'
+				}]), 401);
+			}
+
+			const { account_id, script_name } = c.req.param();
+			if (account_id !== user.account_id) {
+				return c.json(createApiResponse(null, false, [{
+					code: 2007,
+					message: 'Forbidden'
+				}]), 403);
+			}
+
 			const body = c.req.valid('json');
 			const d1 = makeD1Database({ fetcher: c.env.D1DatabaseObject.getByName('faas') });
 
 			try {
+				const { results: functionCheck } = await d1.prepare(`
+					SELECT owner_account_id FROM functions WHERE name = ?
+				`).bind(script_name).all();
+
+				if (functionCheck.length === 0) {
+					return c.json(createApiResponse(null, false, [{
+						code: 2007,
+						message: 'Forbidden'
+					}]), 403);
+				}
+
+				const funcRow = functionCheck[0] as any;
+				if (funcRow.owner_account_id !== user.account_id) {
+					return c.json(createApiResponse(null, false, [{
+						code: 2007,
+						message: 'Forbidden'
+					}]), 403);
+				}
 				const versionId = body.versions[0].version_id;
 
 				const { results } = await d1.prepare(`
@@ -254,11 +438,44 @@ const managementApp = new Hono<{ Bindings: Env }>()
 	.put('/accounts/:account_id/workers/scripts/:script_name/aliases/:alias_name',
 		zValidator('json', aliasSchema),
 		async (c) => {
-			const { script_name, alias_name } = c.req.param();
+			const user = await authenticateUser(c);
+			if (!user) {
+				return c.json(createApiResponse(null, false, [{
+					code: 2006,
+					message: 'Unauthorized'
+				}]), 401);
+			}
+
+			const { account_id, script_name, alias_name } = c.req.param();
+			if (account_id !== user.account_id) {
+				return c.json(createApiResponse(null, false, [{
+					code: 2007,
+					message: 'Forbidden'
+				}]), 403);
+			}
+
 			const body = c.req.valid('json');
 			const d1 = makeD1Database({ fetcher: c.env.D1DatabaseObject.getByName('faas') });
 
 			try {
+				const { results: functionCheck } = await d1.prepare(`
+					SELECT owner_account_id FROM functions WHERE name = ?
+				`).bind(script_name).all();
+
+				if (functionCheck.length === 0) {
+					return c.json(createApiResponse(null, false, [{
+						code: 2007,
+						message: 'Forbidden'
+					}]), 403);
+				}
+
+				const funcRow = functionCheck[0] as any;
+				if (funcRow.owner_account_id !== user.account_id) {
+					return c.json(createApiResponse(null, false, [{
+						code: 2007,
+						message: 'Forbidden'
+					}]), 403);
+				}
 				const { results } = await d1.prepare(`
 					SELECT id FROM versions WHERE id = ? AND function_name = ?
 				`).bind(body.version_id, script_name).all();
@@ -284,21 +501,54 @@ const managementApp = new Hono<{ Bindings: Env }>()
 		}
 	)
 	.get('/accounts/:account_id/workers/scripts/:script_name/versions', async (c) => {
-		const { script_name } = c.req.param();
+		const user = await authenticateUser(c);
+		if (!user) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2006,
+				message: 'Unauthorized'
+			}]), 401);
+		}
+
+		const { account_id, script_name } = c.req.param();
+		if (account_id !== user.account_id) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2007,
+				message: 'Forbidden'
+			}]), 403);
+		}
+
 		const d1 = makeD1Database({ fetcher: c.env.D1DatabaseObject.getByName('faas') });
-		
+
 		try {
+			const { results: functionCheck } = await d1.prepare(`
+				SELECT owner_account_id FROM functions WHERE name = ?
+			`).bind(script_name).all();
+
+			if (functionCheck.length === 0) {
+				return c.json(createApiResponse(null, false, [{
+					code: 2007,
+					message: 'Forbidden'
+				}]), 403);
+			}
+
+			const funcRow = functionCheck[0] as any;
+			if (funcRow.owner_account_id !== user.account_id) {
+				return c.json(createApiResponse(null, false, [{
+					code: 2007,
+					message: 'Forbidden'
+				}]), 403);
+			}
 			const { results } = await d1.prepare(`
-				SELECT id, created_at FROM versions 
+				SELECT id, created_at FROM versions
 				WHERE function_name = ?
 				ORDER BY created_at DESC
 			`).bind(script_name).all();
-			
+
 			const versions = results.map((row: any) => ({
 				id: row.id,
 				created_on: row.created_at
 			}));
-			
+
 			return c.json(createApiResponse(versions));
 		} catch (error) {
 			return c.json(createApiResponse(null, false, [{
@@ -308,22 +558,55 @@ const managementApp = new Hono<{ Bindings: Env }>()
 		}
 	})
 	.get('/accounts/:account_id/workers/scripts/:script_name/aliases', async (c) => {
-		const { script_name } = c.req.param();
+		const user = await authenticateUser(c);
+		if (!user) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2006,
+				message: 'Unauthorized'
+			}]), 401);
+		}
+
+		const { account_id, script_name } = c.req.param();
+		if (account_id !== user.account_id) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2007,
+				message: 'Forbidden'
+			}]), 403);
+		}
+
 		const d1 = makeD1Database({ fetcher: c.env.D1DatabaseObject.getByName('faas') });
-		
+
 		try {
+			const { results: functionCheck } = await d1.prepare(`
+				SELECT owner_account_id FROM functions WHERE name = ?
+			`).bind(script_name).all();
+
+			if (functionCheck.length === 0) {
+				return c.json(createApiResponse(null, false, [{
+					code: 2007,
+					message: 'Forbidden'
+				}]), 403);
+			}
+
+			const funcRow = functionCheck[0] as any;
+			if (funcRow.owner_account_id !== user.account_id) {
+				return c.json(createApiResponse(null, false, [{
+					code: 2007,
+					message: 'Forbidden'
+				}]), 403);
+			}
 			const { results } = await d1.prepare(`
-				SELECT alias_name, version_id, created_at FROM aliases 
+				SELECT alias_name, version_id, created_at FROM aliases
 				WHERE function_name = ?
 				ORDER BY created_at DESC
 			`).bind(script_name).all();
-			
+
 			const aliases = results.map((row: any) => ({
 				name: row.alias_name,
 				version_id: row.version_id,
 				created_on: row.created_at
 			}));
-			
+
 			return c.json(createApiResponse(aliases));
 		} catch (error) {
 			return c.json(createApiResponse(null, false, [{
@@ -351,15 +634,8 @@ const app = new Hono<{ Bindings: Env }>()
 			}]), 500);
 		}
 
-		if (hostname === baseDomain) {
+		if (hostname === baseDomain || !hostname.endsWith(baseDomain)) {
 			return managementApp.fetch(c.req.raw, c.env);
-		}
-
-		if (!hostname.endsWith(baseDomain)) {
-			return c.json(createApiResponse(null, false, [{
-				code: 1007,
-				message: 'Not found'
-			}]), 404);
 		}
 
 		const d1 = makeD1Database({ fetcher: c.env.D1DatabaseObject.getByName('faas') });
@@ -368,10 +644,7 @@ const app = new Hono<{ Bindings: Env }>()
 		const resolved = await resolveFunction(hostname, baseDomain, d1);
 
 		if (!resolved) {
-			return c.json(createApiResponse(null, false, [{
-				code: 1008,
-				message: 'Function not found'
-			}]), 404);
+			return managementApp.fetch(c.req.raw, c.env);
 		}
 
 		try {

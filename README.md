@@ -16,13 +16,66 @@ A self-hosted FaaS (Function as a Service) platform based on Cloudflare Workers 
 
 ## Deployment
 
-### Prerequisites
+### Method 1: Docker (Recommended)
 
-- Node.js and pnpm installed
+**Prerequisites:**
+- Docker and Docker Compose installed
 - Domain with wildcard DNS configured
 - OIDC provider configured
 
-### Setup
+**Steps:**
+
+1. **Pull the image**
+   ```bash
+   docker pull ghcr.io/youxam/workerd-faas:main
+   ```
+
+2. **Configure environment variables**
+
+   Copy `.env.example` to `.env` and configure the required variables:
+   - `BASE_DOMAIN`: Your base domain for function routing
+   - `JWT_SECRET`: Secret key for JWT token signing
+   - OIDC configuration parameters
+
+3. **Configure DNS**
+
+   Set up DNS records or reverse proxy to route the following patterns to your server:
+   - `*.<BASE_DOMAIN>` - Required for basic function access
+   - `*.*.<BASE_DOMAIN>` - Required only if you need multi-version support
+
+4. **Run the container**
+   ```bash
+   docker run -d \
+     --name workerd-faas \
+     -p 8080:8080 \
+     --env-file .env \
+     -v $(pwd)/data:/app/data \
+     ghcr.io/youxam/workerd-faas:main
+   ```
+
+   Or use Docker Compose:
+   ```yaml
+   services:
+     workerd-faas:
+       image: ghcr.io/youxam/workerd-faas:main
+       ports:
+         - "8080:8080"
+       env_file:
+         - .env
+       volumes:
+         - ./data:/app/data
+       restart: unless-stopped
+   ```
+
+### Method 2: From Source
+
+**Prerequisites:**
+- Node.js and pnpm installed
+- [workerd](https://github.com/cloudflare/workerd) installed and available in PATH
+- Domain with wildcard DNS configured
+- OIDC provider configured
+
+**Steps:**
 
 1. **Install dependencies**
    ```bash

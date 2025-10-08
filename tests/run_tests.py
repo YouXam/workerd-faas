@@ -22,7 +22,8 @@ from suites import (
     create_function_suite,
     create_version_suite,
     create_runtime_suite,
-    create_oidc_flow_suite
+    create_oidc_flow_suite,
+    create_pkce_suite
 )
 
 
@@ -31,7 +32,7 @@ def main():
     parser = argparse.ArgumentParser(description='Run FaaS integration tests')
     parser.add_argument(
         '--suite',
-        choices=['oidc', 'auth', 'function', 'version', 'runtime', 'all'],
+        choices=['oidc', 'pkce', 'auth', 'function', 'version', 'runtime', 'all'],
         default='all',
         help='Test suite to run (default: all)'
     )
@@ -47,6 +48,10 @@ def main():
     # OIDC flow tests should run first as they test the complete authentication
     if args.suite == 'all' or args.suite == 'oidc':
         runner.add_suite(create_oidc_flow_suite())
+
+    # PKCE tests
+    if args.suite == 'all' or args.suite == 'pkce':
+        runner.add_suite(create_pkce_suite())
 
     if args.suite == 'all' or args.suite == 'auth':
         runner.add_suite(create_auth_suite())

@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { HttpError, POST, RouteHandler } from "./shared/router.worker";
-import { get, TypedSqlStorage, TypedValue } from "./shared/sql.worker";
+import { HttpError, POST } from "./shared/router.worker";
+import { TypedSqlStorage, TypedValue } from "./shared/sql.worker";
 import { viewToBuffer } from "./shared/data";
 import { MiniflareDurableObject, MiniflareDurableObjectEnv } from "./shared/object.worker";
 

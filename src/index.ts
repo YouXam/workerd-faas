@@ -3,7 +3,7 @@ import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { D1DatabaseObject } from './database';
 import makeD1Database from './shared/d1-api';
-import { authenticateUser, generateToken, generateAuthCode, consumeAuthCode, generateOIDCState, validateOIDCState, UserPayload } from './auth';
+import { authenticateUser, generateToken, generateAuthCode, consumeAuthCode, validatePKCEVerifier, generateRefreshToken, consumeRefreshToken, UserPayload } from './auth';
 import { getOIDCConfig, validateOIDCConfig, exchangeCodeForToken, getUserInfo } from './oidc';
 export { D1DatabaseObject };
 
@@ -123,7 +123,6 @@ async function resolveFunction(hostname: string, baseDomain: string, d1: any): P
 		const parts = subdomain.split('.');
 		if (parts.length === 2) {
 			const [versionPrefix, functionName] = parts;
-
 			const { results } = await d1.prepare(`
 				SELECT id FROM versions
 				WHERE function_name = ? AND id LIKE ?
@@ -162,13 +161,27 @@ async function resolveFunction(hostname: string, baseDomain: string, d1: any): P
 	return null;
 }
 
-const managementApp = new Hono<{ Bindings: Env }>()
+const managementApp: Hono<{ Bindings: Env }> = new Hono<{ Bindings: Env }>()
 	.get('/health', async (c) => {
 		return c.json({
 			status: 'healthy',
 			timestamp: Date.now(),
 			service: 'FaaS Platform'
 		});
+	})
+	.get('/memberships', async (c) => {
+		const user = await authenticateUser(c);
+		if (!user) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2006,
+				message: 'Unauthorized'
+			}]), 401);
+		}
+
+		return c.json(createApiResponse([{
+			id: user.account_id,
+			account: { id: user.account_id }
+		}]));
 	})
 	.get('/oauth2/auth', async (c) => {
 		const oidcConfig = getOIDCConfig(c.env);
@@ -179,36 +192,70 @@ const managementApp = new Hono<{ Bindings: Env }>()
 			}]), 500);
 		}
 
-		const state = generateOIDCState();
+		// PKCE parameters from client (e.g., wrangler)
+		const codeChallenge = c.req.query('code_challenge');
+		const codeChallengeMethod = c.req.query('code_challenge_method') as 'S256' | 'plain' | undefined;
+		const clientRedirectUri = c.req.query('redirect_uri');
+		const clientScope = c.req.query('scope');
+		const clientState = c.req.query('state'); // State from client for CSRF protection
+
+		if (!clientState) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2008,
+				message: 'Missing state parameter'
+			}]), 400);
+		}
+
+		// Encode PKCE parameters into the OIDC state
+		// We'll pass this to OIDC provider and get it back in callback
+		const encodedState = JSON.stringify({
+			client_state: clientState,
+			code_challenge: codeChallenge,
+			code_challenge_method: codeChallengeMethod,
+			client_redirect_uri: clientRedirectUri,
+		});
+		const oidcState = btoa(encodedState); // Base64 encode for safe transmission
+
 		const authUrl = new URL(oidcConfig.authorization_endpoint);
 		authUrl.searchParams.set('client_id', oidcConfig.client_id);
 		authUrl.searchParams.set('redirect_uri', oidcConfig.redirect_uri);
 		authUrl.searchParams.set('response_type', 'code');
-		authUrl.searchParams.set('scope', 'openid profile email');
-		authUrl.searchParams.set('state', state);
+		authUrl.searchParams.set('scope', clientScope || 'openid profile email');
+		authUrl.searchParams.set('state', oidcState); // Use our encoded state for OIDC
 
 		return c.redirect(authUrl.toString());
 	})
 	.get('/auth/callback', async (c) => {
-		const code = c.req.query('code');
-		const state = c.req.query('state');
+		const oidcCode = c.req.query('code');
+		const oidcState = c.req.query('state');
 
-		if (!code || !state) {
+		if (!oidcCode || !oidcState) {
 			return c.json(createApiResponse(null, false, [{
 				code: 2002,
-				message: 'Missing code or state'
+				message: 'Missing code or state from OIDC provider'
 			}]), 400);
 		}
 
-		if (!validateOIDCState(state)) {
+		// Decode the state to get PKCE parameters and client state
+		let stateData: {
+			client_state: string;
+			code_challenge?: string;
+			code_challenge_method?: 'S256' | 'plain';
+			client_redirect_uri?: string;
+		};
+
+		try {
+			const decodedState = atob(oidcState);
+			stateData = JSON.parse(decodedState);
+		} catch (error) {
 			return c.json(createApiResponse(null, false, [{
 				code: 2003,
-				message: 'Invalid state'
+				message: 'Invalid state parameter'
 			}]), 400);
 		}
 
 		const oidcConfig = getOIDCConfig(c.env);
-		const tokenResponse = await exchangeCodeForToken(code, oidcConfig);
+		const tokenResponse = await exchangeCodeForToken(oidcCode, oidcConfig);
 		if (!tokenResponse) {
 			return c.json(createApiResponse(null, false, [{
 				code: 2004,
@@ -251,25 +298,91 @@ const managementApp = new Hono<{ Bindings: Env }>()
 			};
 		}
 
-		const authCode = generateAuthCode(user);
-		return c.redirect(`http://localhost:8976/oauth/callback?code=${authCode}`);
+		// Generate authorization code with embedded PKCE challenge
+		const jwtSecret = c.env.JWT_SECRET;
+		if (!jwtSecret) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2009,
+				message: 'JWT_SECRET not configured'
+			}]), 500);
+		}
+
+		const authCode = await generateAuthCode(
+			user,
+			jwtSecret,
+			stateData.code_challenge,
+			stateData.code_challenge_method
+		);
+
+		// Redirect back to client with authorization code and client's original state
+		const redirectUri = stateData.client_redirect_uri || 'http://localhost:8976/oauth/callback';
+		const redirectUrl = new URL(redirectUri);
+		redirectUrl.searchParams.set('code', authCode);
+		redirectUrl.searchParams.set('state', stateData.client_state);
+
+		return c.redirect(redirectUrl.toString());
 	})
 	.post('/oauth2/token', async (c) => {
-		const body = await c.req.parseBody();
-		const code = body.code as string;
+		const contentType = c.req.header('content-type');
+		let body: Record<string, string>;
 
+		// Support both form-urlencoded (wrangler) and JSON formats
+		if (contentType?.includes('application/x-www-form-urlencoded')) {
+			const formData = await c.req.parseBody();
+			body = Object.fromEntries(
+				Object.entries(formData).map(([k, v]) => [k, String(v)])
+			);
+		} else {
+			body = await c.req.json().catch(() => ({}));
+		}
+
+		const code = body.code;
+		const codeVerifier = body.code_verifier; // PKCE verifier
+		const grantType = body.grant_type;
+		const refreshToken = body.refresh_token;
+
+		// Handle refresh token grant
+		if (grantType === 'refresh_token') {
+			if (!refreshToken) {
+				return c.json({
+					error: 'invalid_request',
+					error_description: 'Missing refresh_token parameter'
+				}, 400);
+			}
+
+			const jwtSecret = c.env.JWT_SECRET;
+			if (!jwtSecret) {
+				return c.json({
+					error: 'server_error',
+					error_description: 'JWT_SECRET not configured'
+				}, 500);
+			}
+
+			const user = await consumeRefreshToken(refreshToken, jwtSecret);
+			if (!user) {
+				return c.json({
+					error: 'invalid_grant',
+					error_description: 'Invalid or expired refresh token'
+				}, 400);
+			}
+
+			const accessToken = await generateToken(user, jwtSecret);
+			const newRefreshToken = await generateRefreshToken(user, jwtSecret);
+
+			return c.json({
+				access_token: accessToken,
+				token_type: 'Bearer',
+				expires_in: 31536000, // 1 year
+				refresh_token: newRefreshToken,
+				scope: 'openid profile email',
+			});
+		}
+
+		// Handle authorization code grant
 		if (!code) {
 			return c.json({
 				error: 'invalid_request',
 				error_description: 'Missing code parameter'
-			}, 400);
-		}
-
-		const user = consumeAuthCode(code);
-		if (!user) {
-			return c.json({
-				error: 'invalid_grant',
-				error_description: 'Invalid or expired authorization code'
 			}, 400);
 		}
 
@@ -281,14 +394,50 @@ const managementApp = new Hono<{ Bindings: Env }>()
 			}, 500);
 		}
 
-		const accessToken = await generateToken(user, jwtSecret);
+		// Decode authorization code (contains user info and PKCE challenge)
+		const authData = await consumeAuthCode(code, jwtSecret);
+		if (!authData) {
+			return c.json({
+				error: 'invalid_grant',
+				error_description: 'Invalid or expired authorization code'
+			}, 400);
+		}
+
+		// Validate PKCE if code_challenge is present in the authorization code
+		if (authData.codeChallenge) {
+			if (!codeVerifier) {
+				return c.json({
+					error: 'invalid_request',
+					error_description: 'Missing code_verifier for PKCE validation'
+				}, 400);
+			}
+
+			const isValid = await validatePKCEVerifier(
+				authData.codeChallenge,
+				authData.codeChallengeMethod || 'plain',
+				codeVerifier
+			);
+
+			if (!isValid) {
+				return c.json({
+					error: 'invalid_grant',
+					error_description: 'Invalid code_verifier'
+				}, 400);
+			}
+		}
+
+		const accessToken = await generateToken(authData.user, jwtSecret);
+		const newRefreshToken = await generateRefreshToken(authData.user, jwtSecret);
+
 		return c.json({
 			access_token: accessToken,
 			token_type: 'Bearer',
-			expires_in: 31536000, // 1 year in seconds
+			expires_in: 31536000, // 1 year
+			refresh_token: newRefreshToken,
+			scope: 'openid profile email',
 		});
 	})
-	.put('/accounts/:account_id/workers/scripts/:script_name', async (c) => {
+	.post('/accounts/:account_id/workers/scripts/:script_name/versions', async (c) => {
 		const user = await authenticateUser(c);
 		if (!user) {
 			return c.json(createApiResponse(null, false, [{
@@ -548,11 +697,49 @@ const managementApp = new Hono<{ Bindings: Env }>()
 				id: row.id,
 				created_on: row.created_at
 			}));
-
 			return c.json(createApiResponse(versions));
 		} catch (error) {
 			return c.json(createApiResponse(null, false, [{
 				code: 1011,
+				message: error instanceof Error ? error.message : 'Unknown error'
+			}]), 400);
+		}
+	})
+	.get('/accounts/:account_id/workers/scripts', async (c) => {
+		const user = await authenticateUser(c);
+		if (!user) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2006,
+				message: 'Unauthorized'
+			}]), 401);
+		}
+
+		const { account_id } = c.req.param();
+		if (account_id !== user.account_id) {
+			return c.json(createApiResponse(null, false, [{
+				code: 2007,
+				message: 'Forbidden'
+			}]), 403);
+		}
+
+		const d1 = makeD1Database({ fetcher: c.env.D1DatabaseObject.getByName('faas') });
+
+		try {
+			const { results } = await d1.prepare(`
+				SELECT name, created_at FROM functions
+				WHERE owner_account_id = ?
+				ORDER BY created_at DESC
+			`).bind(account_id).all();
+
+			const scripts = results.map((row: any) => ({
+				id: row.name,
+				created_on: row.created_at
+			}));
+
+			return c.json(createApiResponse(scripts));
+		} catch (error) {
+			return c.json(createApiResponse(null, false, [{
+				code: 1013,
 				message: error instanceof Error ? error.message : 'Unknown error'
 			}]), 400);
 		}
@@ -615,18 +802,32 @@ const managementApp = new Hono<{ Bindings: Env }>()
 			}]), 400);
 		}
 	})
+	.all('/client/v4/*', async (c) => {
+		// Remove /client/v4 prefix and forward to the original endpoint
+		const originalPath = c.req.path.replace('/client/v4', '');
+		const newUrl = new URL(c.req.url);
+		newUrl.pathname = originalPath;
+
+		// Forward the request to the management app without the prefix
+		const newRequest = new Request(newUrl.toString(), {
+			method: c.req.method,
+			headers: c.req.raw.headers,
+			body: c.req.raw.body,
+		});
+
+		return await managementApp.fetch(newRequest, c.env);
+	})
 	.all('*', async (c) => {
 		return c.json(createApiResponse(null, false, [{
 			code: 1007,
-			message: 'Not found'
+			message: 'Path not found: ' + c.req.method + ' ' + c.req.path
 		}]), 404);
 	});
 
 const app = new Hono<{ Bindings: Env }>()
 	.all('*', async (c) => {
-		const hostname = c.req.header('host') || '';
+		const hostname = c.req.header('host')?.split(':')[0] || '';
 		const baseDomain = c.env.BASE_DOMAIN;
-
 		if (!baseDomain) {
 			return c.json(createApiResponse(null, false, [{
 				code: 1010,
@@ -642,9 +843,11 @@ const app = new Hono<{ Bindings: Env }>()
 		await initializeDatabase(d1);
 
 		const resolved = await resolveFunction(hostname, baseDomain, d1);
-
 		if (!resolved) {
-			return managementApp.fetch(c.req.raw, c.env);
+			return c.json(createApiResponse(null, false, [{
+				code: 1008,
+				message: 'Function not found for hostname: ' + hostname
+			}]), 404);
 		}
 
 		try {

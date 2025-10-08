@@ -15,7 +15,7 @@ def create_function(
     metadata=None
 ):
     """
-    Create a function.
+    Create a function version.
 
     Args:
         func_name: Name of the function
@@ -35,9 +35,10 @@ def create_function(
             'compatibility_date': '2025-01-01'
         }
 
+    # Use the POST /versions endpoint to create a new version
     response = http_request(
-        'PUT',
-        f'{base_url}/accounts/{account_id}/workers/scripts/{func_name}',
+        'POST',
+        f'{base_url}/accounts/{account_id}/workers/scripts/{func_name}/versions',
         headers={
             'Host': host,
             'Authorization': f'Bearer {token}',
@@ -50,7 +51,9 @@ def create_function(
 
     version_id = None
     if response.status_code == 200:
-        version_id = response.json()['result']['id']
+        result = response.json().get('result')
+        if result:
+            version_id = result.get('id')
 
     return response, version_id
 
@@ -104,7 +107,7 @@ def create_and_deploy_function(
     base_url="http://localhost:8080",
     host="func.local",
     metadata=None,
-    wait_time=0.5
+    wait_time=0.1
 ):
     """
     Create and deploy a function in one call.

@@ -73,6 +73,7 @@ export async function getUserInfo(
 		});
 
 		if (!response.ok) {
+			console.log(await response.text());
 			return null;
 		}
 

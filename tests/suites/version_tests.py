@@ -109,8 +109,131 @@ def create_version_suite():
 
         print("✓ Deployment strategies validated correctly")
 
+    def test_alias_routing(ctx):
+        """Alias routing to correct version"""
+        func_name = "routetest"
+
+        # Create two versions
+        script_v1 = "export default { async fetch() { return new Response('Version 1'); } }"
+        _, v1_id = create_function(func_name, script_v1, ctx.account_id, ctx.user_token, FAAS_BASE_URL, FAAS_HOST)
+
+        script_v2 = "export default { async fetch() { return new Response('Version 2'); } }"
+        _, v2_id = create_function(func_name, script_v2, ctx.account_id, ctx.user_token, FAAS_BASE_URL, FAAS_HOST)
+
+        # Create alias pointing to v1
+        response = http_request(
+            'PUT',
+            f'{FAAS_BASE_URL}/accounts/{ctx.account_id}/workers/scripts/{func_name}/aliases/stable',
+            headers={
+                'Host': FAAS_HOST,
+                'Authorization': f'Bearer {ctx.user_token}',
+                'Content-Type': 'application/json'
+            },
+            data=json.dumps({'version_id': v1_id})
+        )
+        assert response.status_code == 200
+
+        # Deploy v2 to main
+        deploy_resp = deploy_function(func_name, v2_id, ctx.account_id, ctx.user_token, FAAS_BASE_URL, FAAS_HOST)
+        assert deploy_resp.status_code == 200
+
+        import time
+        time.sleep(0.1)
+
+        # Test main route (should get v2)
+        resp = http_request('GET', f'{FAAS_BASE_URL}/',
+                           headers={'Host': f'{func_name}.{FAAS_HOST}'})
+        assert resp.status_code == 200
+        assert 'Version 2' in resp.text
+
+        # Test alias route (should get v1)
+        resp = http_request('GET', f'{FAAS_BASE_URL}/',
+                           headers={'Host': f'stable.{func_name}.{FAAS_HOST}'})
+        assert resp.status_code == 200
+        assert 'Version 1' in resp.text
+
+        print("✓ Alias routing works correctly")
+
+    def test_alias_update(ctx):
+        """Test updating an alias to point to different version"""
+        func_name = "updatealias"
+
+        # Create two versions
+        script_v1 = "export default { async fetch() { return Response.json({version: 1}); } }"
+        _, v1_id = create_function(func_name, script_v1, ctx.account_id, ctx.user_token, FAAS_BASE_URL, FAAS_HOST)
+
+        script_v2 = "export default { async fetch() { return Response.json({version: 2}); } }"
+        _, v2_id = create_function(func_name, script_v2, ctx.account_id, ctx.user_token, FAAS_BASE_URL, FAAS_HOST)
+
+        # Create alias pointing to v1
+        response = http_request(
+            'PUT',
+            f'{FAAS_BASE_URL}/accounts/{ctx.account_id}/workers/scripts/{func_name}/aliases/current',
+            headers={
+                'Host': FAAS_HOST,
+                'Authorization': f'Bearer {ctx.user_token}',
+                'Content-Type': 'application/json'
+            },
+            data=json.dumps({'version_id': v1_id})
+        )
+        assert response.status_code == 200
+
+        # Deploy v1
+        deploy_function(func_name, v1_id, ctx.account_id, ctx.user_token, FAAS_BASE_URL, FAAS_HOST)
+
+        import time
+        time.sleep(0.1)
+
+        # Verify v1 response
+        resp = http_request('GET', f'{FAAS_BASE_URL}/',
+                           headers={'Host': f'current.{func_name}.{FAAS_HOST}'})
+        assert resp.status_code == 200
+        assert resp.json()['version'] == 1
+
+        # Update alias to v2
+        response = http_request(
+            'PUT',
+            f'{FAAS_BASE_URL}/accounts/{ctx.account_id}/workers/scripts/{func_name}/aliases/current',
+            headers={
+                'Host': FAAS_HOST,
+                'Authorization': f'Bearer {ctx.user_token}',
+                'Content-Type': 'application/json'
+            },
+            data=json.dumps({'version_id': v2_id})
+        )
+        assert response.status_code == 200
+
+        # Deploy v2
+        deploy_function(func_name, v2_id, ctx.account_id, ctx.user_token, FAAS_BASE_URL, FAAS_HOST)
+        time.sleep(0.1)
+
+        # Verify v2 response
+        resp = http_request('GET', f'{FAAS_BASE_URL}/',
+                           headers={'Host': f'current.{func_name}.{FAAS_HOST}'})
+        assert resp.status_code == 200
+        assert resp.json()['version'] == 2
+
+        print("✓ Alias update works correctly")
+
+    def test_nonexistent_version_deploy(ctx):
+        """Test deploying nonexistent version"""
+        func_name = "nosuchversion"
+
+        # Try to deploy nonexistent version
+        response = deploy_function(
+            func_name, 'nonexistent-version-id',
+            ctx.account_id, ctx.user_token, FAAS_BASE_URL, FAAS_HOST
+        )
+        # Should fail with 404 or 400
+        assert response.status_code in [400, 404]
+
+        print("✓ Nonexistent version deployment rejected")
+
     suite.add_test(test_function_update_and_versioning)
     suite.add_test(test_alias_operations)
     suite.add_test(test_deployment_strategies)
+    suite.add_test(test_alias_routing)
+    suite.add_test(test_alias_update)
+    suite.add_test(test_nonexistent_version_deploy)
 
     return suite

@@ -73,76 +73,163 @@ export async function authenticateUser(c: Context): Promise<UserPayload | null> 
 	return await verifyToken(token, jwtSecret);
 }
 
-// OAuth2 authorization code storage (in-memory for simplicity, should use persistent storage in production)
-interface AuthCode {
-	code: string;
+// OAuth2 authorization code with embedded PKCE challenge (stateless)
+interface AuthCodePayload {
 	account_id: string;
 	username: string;
 	email: string;
 	expires_at: number;
+	code_challenge?: string;
+	code_challenge_method?: 'S256' | 'plain';
 }
 
-const authCodes = new Map<string, AuthCode>();
+/**
+ * Generate authorization code with embedded user info and PKCE challenge
+ * The code is a JWT-like structure that encodes all necessary information
+ */
+export async function generateAuthCode(
+	user: UserPayload,
+	secret: string,
+	codeChallenge?: string,
+	codeChallengeMethod?: 'S256' | 'plain'
+): Promise<string> {
+	const encoder = new TextEncoder();
+	const secretKey = encoder.encode(secret);
 
-export function generateAuthCode(user: UserPayload): string {
-	const code = crypto.randomUUID();
-	authCodes.set(code, {
-		code,
+	const payload: AuthCodePayload = {
 		account_id: user.account_id,
 		username: user.username,
 		email: user.email,
 		expires_at: Date.now() + 10 * 60 * 1000, // 10 minutes
-	});
-	return code;
-}
-
-export function consumeAuthCode(code: string): UserPayload | null {
-	const authCode = authCodes.get(code);
-	if (!authCode) {
-		return null;
-	}
-
-	if (Date.now() > authCode.expires_at) {
-		authCodes.delete(code);
-		return null;
-	}
-
-	authCodes.delete(code);
-	return {
-		account_id: authCode.account_id,
-		username: authCode.username,
-		email: authCode.email,
+		code_challenge: codeChallenge,
+		code_challenge_method: codeChallengeMethod,
 	};
+
+	// Use SignJWT to create a secure, self-contained authorization code
+	return await new SignJWT(payload as any)
+		.setProtectedHeader({ alg: 'HS256' })
+		.setIssuedAt()
+		.setExpirationTime('10m')
+		.sign(secretKey);
 }
 
-// OIDC state management
-interface OIDCState {
-	state: string;
-	expires_at: number;
-}
+/**
+ * Consume and validate authorization code
+ * Returns user payload and PKCE challenge if present
+ */
+export async function consumeAuthCode(
+	code: string,
+	secret: string
+): Promise<{ user: UserPayload; codeChallenge?: string; codeChallengeMethod?: 'S256' | 'plain' } | null> {
+	try {
+		const encoder = new TextEncoder();
+		const secretKey = encoder.encode(secret);
 
-const oidcStates = new Map<string, OIDCState>();
+		const { payload } = await jwtVerify(code, secretKey);
 
-export function generateOIDCState(): string {
-	const state = crypto.randomUUID();
-	oidcStates.set(state, {
-		state,
-		expires_at: Date.now() + 10 * 60 * 1000, // 10 minutes
-	});
-	return state;
-}
+		// Validate payload structure
+		if (
+			typeof payload.account_id === 'string' &&
+			typeof payload.username === 'string' &&
+			typeof payload.email === 'string' &&
+			typeof payload.expires_at === 'number'
+		) {
+			// Check expiration
+			if (Date.now() > payload.expires_at) {
+				return null;
+			}
 
-export function validateOIDCState(state: string): boolean {
-	const oidcState = oidcStates.get(state);
-	if (!oidcState) {
-		return false;
+			const user: UserPayload = {
+				account_id: payload.account_id,
+				username: payload.username,
+				email: payload.email,
+			};
+
+			return {
+				user,
+				codeChallenge: payload.code_challenge as string | undefined,
+				codeChallengeMethod: payload.code_challenge_method as 'S256' | 'plain' | undefined,
+			};
+		}
+
+		return null;
+	} catch (error) {
+		return null;
 	}
-
-	if (Date.now() > oidcState.expires_at) {
-		oidcStates.delete(state);
-		return false;
-	}
-
-	oidcStates.delete(state);
-	return true;
 }
+
+// PKCE (Proof Key for Code Exchange) validation - stateless
+export async function validatePKCEVerifier(
+	codeChallenge: string,
+	codeChallengeMethod: 'S256' | 'plain',
+	codeVerifier: string
+): Promise<boolean> {
+	if (codeChallengeMethod === 'S256') {
+		// SHA256 hash the verifier and compare
+		const encoder = new TextEncoder();
+		const data = encoder.encode(codeVerifier);
+		const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+
+		// Convert to base64url
+		const hashArray = Array.from(new Uint8Array(hashBuffer));
+		const hashBinary = String.fromCharCode(...hashArray);
+		const base64 = btoa(hashBinary)
+			.replace(/\+/g, '-')
+			.replace(/\//g, '_')
+			.replace(/=/g, '');
+
+		return base64 === codeChallenge;
+	} else {
+		// Plain comparison
+		return codeVerifier === codeChallenge;
+	}
+}
+
+// Refresh token (stateless JWT with longer expiration)
+export async function generateRefreshToken(user: UserPayload, secret: string): Promise<string> {
+	const encoder = new TextEncoder();
+	const secretKey = encoder.encode(secret);
+
+	return await new SignJWT({
+		account_id: user.account_id,
+		username: user.username,
+		email: user.email,
+		type: 'refresh', // Mark as refresh token
+	})
+		.setProtectedHeader({ alg: 'HS256' })
+		.setIssuedAt()
+		.setExpirationTime('365d') // 1 year
+		.sign(secretKey);
+}
+
+export async function consumeRefreshToken(token: string, secret: string): Promise<UserPayload | null> {
+	try {
+		const encoder = new TextEncoder();
+		const secretKey = encoder.encode(secret);
+
+		const { payload } = await jwtVerify(token, secretKey);
+
+		// Validate it's a refresh token
+		if (payload.type !== 'refresh') {
+			return null;
+		}
+
+		// Validate payload has required fields
+		if (
+			typeof payload.account_id === 'string' &&
+			typeof payload.username === 'string' &&
+			typeof payload.email === 'string'
+		) {
+			return {
+				account_id: payload.account_id,
+				username: payload.username,
+				email: payload.email,
+			} as UserPayload;
+		}
+
+		return null;
+	} catch (error) {
+		return null;
+	}
+}
+

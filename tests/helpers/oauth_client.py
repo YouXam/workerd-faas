@@ -74,13 +74,16 @@ class OAuthTestClient:
 
         return CallbackHandler
 
-    def login_flow(self, faas_base_url, timeout=10):
+    def login_flow(self, faas_base_url, timeout=10, code_challenge=None, code_challenge_method=None, code_verifier=None):
         """
         Perform complete OAuth login flow.
 
         Args:
             faas_base_url: Base URL of FaaS service (e.g., http://localhost:8080)
             timeout: Timeout in seconds to wait for callback
+            code_challenge: Optional PKCE code challenge
+            code_challenge_method: Optional PKCE code challenge method (S256 or plain)
+            code_verifier: Optional PKCE code verifier (for token exchange)
 
         Returns:
             dict with access_token and other token response data, or None if failed
@@ -103,8 +106,19 @@ class OAuthTestClient:
             # We need to manually follow the redirect chain
             print(f"[OAuth Client] Starting login flow...")
 
-            # First request to FaaS /oauth2/auth
-            auth_url = f'{faas_base_url}/oauth2/auth'
+            # Generate a random state for CSRF protection
+            import secrets
+            state = secrets.token_urlsafe(32)
+
+            # Build auth URL with required parameters
+            auth_url = f'{faas_base_url}/oauth2/auth?state={state}&redirect_uri=http://localhost:{self.client_port}/callback'
+
+            # Add PKCE parameters if provided
+            if code_challenge:
+                auth_url += f'&code_challenge={code_challenge}'
+                if code_challenge_method:
+                    auth_url += f'&code_challenge_method={code_challenge_method}'
+
             print(f"[OAuth Client] Step 1: GET {auth_url}")
 
             # We can't easily follow redirects automatically, so we'll simulate the flow:
@@ -187,11 +201,22 @@ class OAuthTestClient:
 
             print(f"[OAuth Client] Step 5: Received authorization code: {self.callback_code[:20]}...")
 
+            # Save the code for reuse tests
+            self.last_code = self.callback_code
+
+            # Save the code_verifier for later use
+            self.last_code_verifier = code_verifier if code_challenge else None
+
             # Step 2: Exchange authorization code for access token
             token_url = f'{faas_base_url}/oauth2/token'
             token_data = {
-                'code': self.callback_code
+                'code': self.callback_code,
+                'grant_type': 'authorization_code'
             }
+
+            # Add code_verifier if PKCE was used
+            if code_challenge and code_verifier:
+                token_data['code_verifier'] = code_verifier
 
             print(f"[OAuth Client] Step 6: Exchanging code for token at {token_url}")
 
@@ -244,8 +269,8 @@ class OAuthTestClient:
             # Try to create a test function
             test_func_name = f'authtest{int(time.time())}'
             response = http_request(
-                'PUT',
-                f'{faas_base_url}/accounts/{account_id}/workers/scripts/{test_func_name}',
+                'POST',
+                f'{faas_base_url}/accounts/{account_id}/workers/scripts/{test_func_name}/versions',
                 headers={
                     'Host': 'func.local',
                     'Authorization': f'Bearer {token}'

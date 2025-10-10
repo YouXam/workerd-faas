@@ -11,8 +11,9 @@ A self-hosted FaaS (Function as a Service) platform based on Cloudflare Workers 
 - **Wrangler-compatible CLI**: Use `wrkst` CLI tool for seamless deployment workflow
 - **Environment Variables**: Function configuration through environment variables
 - **Database Support**:
+  - **D1 Database**: Built-in SQLite database support with Cloudflare D1 API compatibility
   - Direct PostgreSQL connections (new connection per request)
-  - Recommended: Use serverless database services like Supabase for better performance
+  - Recommended: Use D1 for serverless SQLite or Supabase for PostgreSQL
 
 ## Deployment
 
@@ -136,6 +137,92 @@ Follow the [Cloudflare Workers guide](https://developers.cloudflare.com/workers/
 wrkst deploy
 ```
 
+## Bindings
+
+### Environment Variables
+
+You can configure environment variables for your functions by setting `vars` in your `wrangler.toml` or `wrangler.jsonc`:
+
+```toml
+# wrangler.toml
+[vars]
+API_KEY = "your-api-key"
+DATABASE_URL = "your-database-url"
+```
+
+Or in `wrangler.jsonc`:
+
+```jsonc
+{
+  "vars": {
+    "API_KEY": "your-api-key",
+    "DATABASE_URL": "your-database-url"
+  }
+}
+```
+
+**⚠️ Important:** Do not use `D1` as a variable name. This is a reserved binding name used by the D1 database support and will be overridden.
+
+### D1 Database
+
+This platform provides built-in D1 database support through the `wrkst-d1` runtime library, which is compatible with both this FaaS platform and standard Cloudflare Workers.
+
+#### Installation
+
+```bash
+npm install wrkst-d1
+# or
+pnpm add wrkst-d1
+```
+
+#### Usage
+
+The `wrkst-d1` library automatically detects the runtime environment:
+- **On this FaaS platform**: Uses the built-in D1 gateway (no binding configuration needed)
+- **On Cloudflare Workers/Miniflare**: Uses standard D1 binding
+
+**Example:**
+
+```typescript
+import { getD1 } from 'wrkst-d1';
+
+export default {
+  async fetch(request: Request, env: any) {
+    // Get D1 database instance
+    const db = getD1(env);
+
+    // Initialize schema
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL
+      )
+    `);
+
+    // Query the database
+    const result = await db.prepare('SELECT * FROM users WHERE id = ?')
+      .bind(1)
+      .first();
+
+    return new Response(JSON.stringify(result));
+  }
+}
+```
+
+#### Cloudflare Workers / Miniflare Compatibility
+
+When deploying to Cloudflare Workers or testing with Miniflare, configure a D1 binding named `"D1"` in your `wrangler.toml`:
+
+```toml
+[[d1_databases]]
+binding = "D1"  # Must be named "D1" for wrkst-d1 compatibility
+database_name = "my-database"
+database_id = "your-database-id"
+```
+
+The same code will work on both platforms without modification. The `wrkst-d1` library handles the runtime differences automatically.
+
 ## Testing Locally
 
 For local testing without DNS configuration:
@@ -163,9 +250,12 @@ Functions are routed based on subdomain patterns:
 
 This platform leverages the **experimental worker-loader** to enable dynamic worker loading, which allows runtime deployment and execution of user-submitted functions without restarting the server. This is the core capability that makes the FaaS functionality possible.
 
-For the platform database, we implement the **D1 API** backed by **SQLite Durable Objects**, with database files persisted in the `data/do` directory. However, due to worker-loader limitations, D1 databases are **not available** within deployed functions themselves, and in-memory state persistence is also not supported. This means your functions must rely on TCP connections to external databases like PostgreSQL or MySQL, or use serverless storage services such as Supabase for data persistence.
+For the platform database, we implement the **D1 API** backed by **SQLite Durable Objects**, with database files persisted in the `data/do` directory. Each deployed function gets its own isolated D1 database instance. The platform uses a D1 Gateway Worker to route database requests: each function is assigned a unique UUID-based hostname (e.g., `<uuid>.d1.worker`), which is stored in the platform database and reused across restarts. Database files are persisted in the `data/do` directory, and the `wrkst-d1` runtime library provides a Cloudflare-compatible D1 API. This architecture allows functions to use D1 databases while maintaining isolation between different functions. The `wrkst-d1` library is also compatible with standard Cloudflare Workers, making it easy to migrate functions between platforms.
 
-The `wrkst` CLI tool is a fork of Wrangler, but with significantly limited functionality. Currently, only Workers that use `vars` are properly supported. Other Cloudflare bindings like KV, R2, D1, and Durable Objects will not work correctly when deployed through this platform.
+The `wrkst` CLI tool is a fork of Wrangler, but with significantly limited functionality. Currently supported bindings are:
+- ✅ **Environment Variables** (`vars`)
+- ✅ **D1 Databases** (via `wrkst-d1` library)
+- ❌ **KV, R2, Durable Objects** - Not currently supported
 
 The platform supports multi-version deployment, allowing you to access specific versions of your functions via the pattern `<version_id_prefix>.<func_name>.<base_domain>`. Note that this requires proper DNS and SSL (if used) configuration for the `*.*.<BASE_DOMAIN>` wildcard pattern. Additionally, while the platform implements function aliases at the API level, there is currently no CLI support for managing them - you'll need to interact with the API directly to create or modify aliases.
 

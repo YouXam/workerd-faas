@@ -33,7 +33,8 @@ const faas :Workerd.Worker = (
 		(name = "OIDC_USERINFO_ENDPOINT", fromEnvironment = "OIDC_USERINFO_ENDPOINT"),
 		(name = "OIDC_CLIENT_ID", fromEnvironment = "OIDC_CLIENT_ID"),
 		(name = "OIDC_CLIENT_SECRET", fromEnvironment = "OIDC_CLIENT_SECRET"),
-		(name = "OIDC_REDIRECT_URI", fromEnvironment = "OIDC_REDIRECT_URI")
+		(name = "OIDC_REDIRECT_URI", fromEnvironment = "OIDC_REDIRECT_URI"),
+		(name = "USE_FORWARDED_HOST", fromEnvironment = "USE_FORWARDED_HOST")
   ],
   compatibilityDate = "2025-08-28",
   compatibilityFlags = ["nodejs_compat"],

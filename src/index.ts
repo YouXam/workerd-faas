@@ -826,7 +826,8 @@ const managementApp: Hono<{ Bindings: Env }> = new Hono<{ Bindings: Env }>()
 
 const app = new Hono<{ Bindings: Env }>()
 	.all('*', async (c) => {
-		const hostname = c.req.header('host')?.split(':')[0] || '';
+		const useForwardedHost = c.env.USE_FORWARDED_HOST?.toLowerCase() === 'true';
+		const hostname = (useForwardedHost ? (c.req.header('x-forwarded-host') || c.req.header('host')) : c.req.header('host'))?.split(':')[0] || '';
 		const baseDomain = c.env.BASE_DOMAIN;
 		if (!baseDomain) {
 			return c.json(createApiResponse(null, false, [{

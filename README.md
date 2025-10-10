@@ -35,6 +35,7 @@ A self-hosted FaaS (Function as a Service) platform based on Cloudflare Workers 
    Copy `.env.example` to `.env` and configure the required variables:
    - `BASE_DOMAIN`: Your base domain for function routing
    - `JWT_SECRET`: Secret key for JWT token signing
+   - `USE_FORWARDED_HOST`: Set to `true` to use `X-Forwarded-Host` header for hostname resolution when behind a reverse proxy (default: disabled)
    - OIDC configuration parameters
 
 3. **Configure DNS**
@@ -86,6 +87,7 @@ A self-hosted FaaS (Function as a Service) platform based on Cloudflare Workers 
 
    Copy `.env.example` to `.env` and configure the required variables:
    - `BASE_DOMAIN`: Your base domain for function routing
+   - `USE_FORWARDED_HOST`: Set to `true` to use `X-Forwarded-Host` header for hostname resolution when behind a reverse proxy (default: disabled)
    - OIDC configuration parameters
 
 3. **Configure DNS**

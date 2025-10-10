@@ -45,7 +45,12 @@ A self-hosted FaaS (Function as a Service) platform based on Cloudflare Workers 
    - `*.<BASE_DOMAIN>` - Required for basic function access
    - `*.*.<BASE_DOMAIN>` - Required only if you need multi-version support
 
-4. **Run the container**
+4. **Create data directories**
+   ```bash
+   mkdir -p data/do data/files
+   ```
+
+5. **Run the container**
    ```bash
    docker run -d \
      --name workerd-faas \

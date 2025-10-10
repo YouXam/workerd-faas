@@ -19,7 +19,7 @@ const faas :Workerd.Worker = (
 		(name = "worker", esModule = embed "dist/main/index.js")
   ],
 	durableObjectNamespaces = [
-		(className = "D1DatabaseObject", uniqueKey = "D1DatabaseObject", enableSql = true),
+		(className = "D1DatabaseObject", uniqueKey = "FaaS", enableSql = true),
   ],
 	durableObjectStorage = ( localDisk = "DO_DIR" ),
 	bindings = [

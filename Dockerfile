@@ -14,8 +14,7 @@ RUN pnpm install --frozen-lockfile
 # Copy source files
 COPY . .
 
-# Build the project (skip cf-typegen as it requires workerd binary)
-RUN npx wrangler build
+RUN pnpm build
 
 FROM debian:bookworm-slim
 

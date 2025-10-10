@@ -1,0 +1,55 @@
+{
+  "name": "wrkst-d1",
+  "version": "0.1.0",
+  "description": "D1 database runtime library for Cloudflare Workers and compatible FaaS platforms",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "pnpm run build"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "d1",
+    "database",
+    "runtime",
+    "faas",
+    "serverless",
+    "sql",
+    "sqlite"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.5.2"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/workers-types": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/youxam/workerd-faas.git",
+    "directory": "packages/wrkst-d1"
+  },
+  "bugs": {
+    "url": "https://github.com/youxam/workerd-faas/issues"
+  },
+  "homepage": "https://github.com/youxam/workerd-faas/tree/main/packages/wrkst-d1#readme"
+}

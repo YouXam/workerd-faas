@@ -70,7 +70,22 @@ async function listDirectory(FILES: any, path: string): Promise<{name: string, t
 	return await res.json();
 }
 
-async function getWorkerFromCache(LOADER: any, functionName: string, versionId: string, FILES: any): Promise<any> {
+function createD1OutboundFetcher(d1Hostname: string, d1DatabaseObject: any, functionName: string): any {
+	return {
+		fetch: async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+			const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+
+			if (url.hostname === d1Hostname) {
+				const d1Fetcher = d1DatabaseObject.getByName(functionName);
+				return d1Fetcher.fetch(input, init);
+			}
+
+			return fetch(input, init);
+		}
+	};
+}
+
+async function getWorkerFromCache(LOADER: any, functionName: string, versionId: string, FILES: any, D1DatabaseObject: any): Promise<any> {
 	const cacheKey = `${functionName}-${versionId}`;
 
 	return LOADER.get(cacheKey, async () => {
@@ -102,12 +117,18 @@ async function getWorkerFromCache(LOADER: any, functionName: string, versionId: 
 			}
 		}
 
+		const d1Uuid = crypto.randomUUID();
+		const d1Hostname = `${d1Uuid}.d1.worker`;
+		env.D1 = d1Hostname;
+		const globalOutbound = createD1OutboundFetcher(d1Hostname, D1DatabaseObject, functionName);
+
 		return {
 			compatibilityDate: metadata.compatibility_date || '2025-01-01',
 			compatibility_flags: metadata.compatibility_flags || [],
 			mainModule: metadata.main_module,
 			modules,
 			env,
+			globalOutbound,
 		};
 	});
 }
@@ -852,7 +873,7 @@ const app = new Hono<{ Bindings: Env }>()
 		}
 
 		try {
-			const worker = await getWorkerFromCache(c.env.LOADER, resolved.functionName, resolved.versionId, c.env.FILES);
+			const worker = await getWorkerFromCache(c.env.LOADER, resolved.functionName, resolved.versionId, c.env.FILES, c.env.D1DatabaseObject);
 			const workerInstance = await worker.getEntrypoint();
 			return await workerInstance.fetch(c.req.raw);
 		} catch (error) {

@@ -40,6 +40,8 @@ async function initializeDatabase(d1: any) {
 
 	await d1.exec('CREATE TABLE IF NOT EXISTS aliases (function_name TEXT NOT NULL, alias_name TEXT NOT NULL, version_id TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (function_name, alias_name), FOREIGN KEY (function_name) REFERENCES functions(name), FOREIGN KEY (version_id) REFERENCES versions(id))');
 
+	await d1.exec('CREATE TABLE IF NOT EXISTS d1_mappings (function_name TEXT PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
+
 }
 
 function createApiResponse(result: any, success: boolean = true, errors: any[] = [], messages: any[] = []) {
@@ -70,22 +72,14 @@ async function listDirectory(FILES: any, path: string): Promise<{name: string, t
 	return await res.json();
 }
 
-function createD1OutboundFetcher(d1Hostname: string, d1DatabaseObject: any, functionName: string): any {
-	return {
-		fetch: async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-			const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url);
-
-			if (url.hostname === d1Hostname) {
-				const d1Fetcher = d1DatabaseObject.getByName(functionName);
-				return d1Fetcher.fetch(input, init);
-			}
-
-			return fetch(input, init);
-		}
-	};
-}
-
-async function getWorkerFromCache(LOADER: any, functionName: string, versionId: string, FILES: any, D1DatabaseObject: any): Promise<any> {
+async function getWorkerFromCache(
+	LOADER: any,
+	functionName: string,
+	versionId: string,
+	FILES: any,
+	D1DatabaseObject: any,
+	D1_GATEWAY: Fetcher
+): Promise<any> {
 	const cacheKey = `${functionName}-${versionId}`;
 
 	return LOADER.get(cacheKey, async () => {
@@ -117,10 +111,25 @@ async function getWorkerFromCache(LOADER: any, functionName: string, versionId: 
 			}
 		}
 
-		const d1Uuid = crypto.randomUUID();
-		const d1Hostname = `${d1Uuid}.d1.worker`;
-		env.D1 = d1Hostname;
-		const globalOutbound = createD1OutboundFetcher(d1Hostname, D1DatabaseObject, functionName);
+		const d1 = makeD1Database({
+			fetcher: D1DatabaseObject.getByName('faas')
+		});
+		await initializeDatabase(d1);
+
+		const { results } = await d1.prepare(`
+			SELECT uuid FROM d1_mappings WHERE function_name = ?
+		`).bind(functionName).all();
+
+		let d1Uuid: string;
+		if (results.length > 0) {
+			d1Uuid = (results[0] as any).uuid;
+		} else {
+			d1Uuid = crypto.randomUUID();
+			await d1.prepare(`
+				INSERT INTO d1_mappings (function_name, uuid) VALUES (?, ?)
+			`).bind(functionName, d1Uuid).run();
+		}
+		env.D1 = `${d1Uuid}.d1.worker`;
 
 		return {
 			compatibilityDate: metadata.compatibility_date || '2025-01-01',
@@ -128,7 +137,7 @@ async function getWorkerFromCache(LOADER: any, functionName: string, versionId: 
 			mainModule: metadata.main_module,
 			modules,
 			env,
-			globalOutbound,
+			globalOutbound: D1_GATEWAY
 		};
 	});
 }
@@ -873,7 +882,7 @@ const app = new Hono<{ Bindings: Env }>()
 		}
 
 		try {
-			const worker = await getWorkerFromCache(c.env.LOADER, resolved.functionName, resolved.versionId, c.env.FILES, c.env.D1DatabaseObject);
+			const worker = await getWorkerFromCache(c.env.LOADER, resolved.functionName, resolved.versionId, c.env.FILES, c.env.D1DatabaseObject, c.env.D1_GATEWAY);
 			const workerInstance = await worker.getEntrypoint();
 			return await workerInstance.fetch(c.req.raw);
 		} catch (error) {

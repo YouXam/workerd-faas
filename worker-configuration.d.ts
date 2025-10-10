@@ -20,6 +20,7 @@ declare namespace Cloudflare {
 		OIDC_CLIENT_SECRET?: string;
 		OIDC_REDIRECT_URI?: string;
 		USE_FORWARDED_HOST?: string;
+		D1_GATEWAY: Fetcher;
 	}
 }
 interface Env extends Cloudflare.Env {}

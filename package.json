@@ -3,8 +3,11 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
+		"build": "pnpm run build:main && pnpm run build:d1-gateway",
+		"build:main": "wrangler deploy --dry-run --outdir=dist/main --config wrangler.jsonc",
+		"build:d1-gateway": "wrangler deploy --dry-run --outdir=dist/d1-gateway --config wrangler.d1-gateway.jsonc",
 		"dev": "concurrently \"pnpm run watch\" \"pnpm run start\"",
-		"watch": "nodemon --watch src --watch tsconfig.json --watch worker-configuration.d.ts --watch package.json --watch pnpm-lock.yaml --ext ts,json,d.ts --exec \"wrangler build\"",
+		"watch": "nodemon --watch src --watch tsconfig.json --watch worker-configuration.d.ts --watch package.json --watch pnpm-lock.yaml --ext ts,json,d.ts --exec \"pnpm run build\"",
 		"start": "while read line; do export $line; done < .env && mkdir -p data/do && mkdir -p data/files && workerd serve config.capnp --verbose --experimental -w",
 		"cf-typegen": "wrangler types",
 		"test": "python3 tests/run_tests.py",

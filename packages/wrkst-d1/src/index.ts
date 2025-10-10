@@ -1,7 +1,7 @@
 import makeD1Database from './d1-api';
 
 export interface D1Env {
-	D1: string;
+	D1: string | D1Database
 }
 
 /**
@@ -47,7 +47,7 @@ export function getD1(env: D1Env): ReturnType<typeof makeD1Database> {
 			} else {
 				url = new URL(input.url);
 			}
-			url.hostname = env.D1;
+			url.hostname = env.D1 as string;
 
 			if (init) {
 				return fetch(url, init);

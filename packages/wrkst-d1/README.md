@@ -19,7 +19,7 @@ yarn add wrkst-d1
 When deploying to a compatible FaaS platform (like workerd-faas), you can use the D1 database in your worker code:
 
 ```typescript
-import { getD1 } from 'wrkst-d1/client';
+import { getD1 } from 'wrkst-d1';
 
 export default {
   async fetch(request: Request, env: any) {
